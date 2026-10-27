@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function eventDoc(eid) { return get(/databases/$(database)/documents/events/$(eid)); }
+    function isOwner(eid) { return signedIn() && eventDoc(eid).data.ownerUid == request.auth.uid; }
+    function isMember(eid) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/events/$(eid)/members/$(request.auth.uid));
+    }
+
+    match /events/{eid} {
+      allow read: if isMember(eid)
+        || (signedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+      // Only the host edits location/date/time/details; ownership can't be transferred.
+      allow update: if signedIn()
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if false; // events are kept for history
+
+      // Joining requires the event's current invite token (from the invite link).
+      match /members/{uid} {
+        allow read: if isMember(eid);
+        allow create: if signedIn() && request.auth.uid == uid
+          && request.resource.data.token == eventDoc(eid).data.inviteToken;
+        allow update: if signedIn() && request.auth.uid == uid
+          && request.resource.data.token == resource.data.token;
+        allow delete: if isOwner(eid) || (signedIn() && request.auth.uid == uid);
+      }
+
+      // Only the host manages categories.
+      match /categories/{cid} {
+        allow read: if isMember(eid);
+        allow write: if isOwner(eid);
+      }
+
+      // Guests add their own items; they (or the host) can edit them. Never hard-deleted.
+      match /items/{iid} {
+        allow read: if isMember(eid);
+        allow create: if isMember(eid) && request.resource.data.uid == request.auth.uid;
+        allow update: if isMember(eid)
+          && (resource.data.uid == request.auth.uid || isOwner(eid))
+          && request.resource.data.uid == resource.data.uid;
+        allow delete: if false;
+      }
+
+      // Append-only activity log.
+      match /history/{hid} {
+        allow read: if isMember(eid);
+        allow create: if isMember(eid) && request.resource.data.actorUid == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // Each user's list of potlucks they host or joined.
+    match /users/{uid}/events/{eid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+  }
+}
